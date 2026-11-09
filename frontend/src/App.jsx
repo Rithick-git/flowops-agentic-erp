@@ -6,6 +6,7 @@ import {
 } from "lucide-react";
 import CameraBarcodeScanner from "./CameraBarcodeScanner";
 import ProcessFlowMap from "./ProcessFlowMap";
+import { initialErpState } from "./erpStore";
 
 const API = (import.meta.env.VITE_API_URL ? import.meta.env.VITE_API_URL.replace(/\/$/, "") : "") + "/api/erp";
 
@@ -52,7 +53,7 @@ const PRESET_INTAKES = [
 ];
 
 export default function App() {
-  const [erp, setErp] = useState(null);
+  const [erp, setErp] = useState(initialErpState);
   const [activeRole, setActiveRole] = useState("WAREHOUSE");
   const [mobilePreview, setMobilePreview] = useState(false);
   const [intakeInput, setIntakeInput] = useState(PRESET_INTAKES[0].text);
@@ -66,8 +67,10 @@ export default function App() {
   const loadState = async () => {
     try {
       const res = await fetch(`${API}/state`);
-      const data = await res.json();
-      setErp(data);
+      if (res.ok) {
+        const data = await res.json();
+        setErp(data);
+      }
     } catch (e) {}
   };
 
@@ -79,43 +82,213 @@ export default function App() {
   const handleIntake = async (textOverride, hallucinateFlag = false, modeLabel = "Zero-Entry AI Intake") => {
     const payloadText = textOverride ?? intakeInput;
     setIntakeInput(payloadText);
-    const res = await fetch(`${API}/intake`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        mode: modeLabel,
-        rawText: payloadText,
-        simulateHallucination: hallucinateFlag
-      })
-    });
-    const data = await res.json();
-    setStatusBanner({ status: data.status, message: data.message });
-    setLastGuardrail({ ...data.guardrail, proposedToolArgs: data.proposedToolArgs });
-    if (data.state) setErp({ ...erp, ...data.state });
-    loadState();
+
+    try {
+      const res = await fetch(`${API}/intake`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: modeLabel,
+          rawText: payloadText,
+          simulateHallucination: hallucinateFlag
+        })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setStatusBanner({ status: data.status, message: data.message });
+        setLastGuardrail({ ...data.guardrail, proposedToolArgs: data.proposedToolArgs });
+        if (data.state) setErp({ ...erp, ...data.state });
+        loadState();
+        return;
+      }
+    } catch (e) {}
+
+    // Resilient client-side fallback for static deployments (GitHub Pages)
+    const skuMatch = payloadText.match(/SKU-\d{4}/i);
+    const textWithoutSku = payloadText.replace(/SKU-\d{4}/gi, "").replace(/#?(?:PL|PO|BX|DR|INV)-\d+/gi, "");
+    const qtyMatch = textWithoutSku.match(/\b(?:qty:?\s*|quantity:?\s*)?(\d+)\s*(?:units|packs|modules|motors|items|qty)?\b/i);
+
+    let extractedSku = "SKU-4090";
+    if (skuMatch) {
+      extractedSku = skuMatch[0].toUpperCase();
+    } else if (/8821|bosch|battery/i.test(payloadText)) {
+      extractedSku = "SKU-8821";
+    } else if (/1044|siemens|plc/i.test(payloadText)) {
+      extractedSku = "SKU-1044";
+    } else if (/5532|hydraulic|sensor/i.test(payloadText)) {
+      extractedSku = "SKU-5532";
+    }
+
+    const extractedQty = qtyMatch ? parseInt(qtyMatch[1], 10) : 25;
+    const proposedToolArgs = {
+      sku: extractedSku,
+      quantity: extractedQty,
+      unitCost: hallucinateFlag ? 999 : 420
+    };
+
+    const textLower = payloadText.toLowerCase();
+    const fieldResults = {};
+    let allGrounded = true;
+    for (const [key, val] of Object.entries(proposedToolArgs)) {
+      const valStr = String(val).toLowerCase();
+      const grounded = hallucinateFlag && key === "unitCost"
+        ? false
+        : (textLower.includes(valStr) || (key === "sku" && textLower.includes(valStr.replace("sku-", ""))));
+      const confidence = grounded ? Number((0.94 + Math.random() * 0.05).toFixed(2)) : Number((0.12 + Math.random() * 0.15).toFixed(2));
+      fieldResults[key] = { value: val, grounded, confidence };
+      if (!grounded || confidence < 0.85) allGrounded = false;
+    }
+
+    const guardrail = {
+      verdict: allGrounded ? "PROCEED" : "GUIDE_INTERCEPTED",
+      latencyMs: Math.floor(104 + Math.random() * 18),
+      fieldResults
+    };
+
+    setLastGuardrail({ ...guardrail, proposedToolArgs });
+
+    if (guardrail.verdict === "GUIDE_INTERCEPTED") {
+      setStatusBanner({
+        status: "INTERCEPTED",
+        message: "Guardrail blocked ungrounded ERP mutation! The AI tried to assume a Unit Cost ($999) not present in your voice/invoice input."
+      });
+      const newAudit = {
+        id: `AUD-${Date.now().toString().slice(-4)}`,
+        timestamp: new Date().toISOString(),
+        actor: modeLabel || "AI Copilot",
+        action: "BLOCKED_UNGROUNDED_ERP_WRITE",
+        verdict: "GUIDE_INTERCEPTED",
+        latencyMs: guardrail.latencyMs,
+        confidence: 0.96,
+        details: `Intercepted update_inventory(${JSON.stringify(proposedToolArgs)}): LLM assumed unitCost=$999 without grounding.`
+      };
+      setErp((prev) => ({ ...prev, auditLogs: [newAudit, ...prev.auditLogs] }));
+    } else {
+      setErp((prev) => {
+        const inv = prev.inventory.map((item) => {
+          if (item.sku === extractedSku) {
+            const newStock = item.stock + extractedQty;
+            return { ...item, stock: newStock, status: newStock > item.reorderPoint ? "OPTIMAL" : "LOW_STOCK" };
+          }
+          return item;
+        });
+        const totalVal = inv.reduce((sum, item) => sum + item.stock * item.unitCost, 0);
+        const lowCount = inv.filter((i) => i.stock <= i.reorderPoint).length;
+        const newAudit = {
+          id: `AUD-${Date.now().toString().slice(-4)}`,
+          timestamp: new Date().toISOString(),
+          actor: modeLabel || "Multimodal Intake",
+          action: `COMMITTED_INVENTORY_+${extractedQty}_${extractedSku}`,
+          verdict: "PROCEED",
+          latencyMs: guardrail.latencyMs,
+          confidence: 0.98,
+          details: `Updated ${extractedSku} stock by +${extractedQty} units. Zero manual typing required.`
+        };
+        return {
+          ...prev,
+          inventory: inv,
+          auditLogs: [newAudit, ...prev.auditLogs],
+          kpis: { ...prev.kpis, totalInventoryValue: totalVal, lowStockCount: lowCount }
+        };
+      });
+      setStatusBanner({
+        status: "COMMITTED",
+        message: `Successfully committed +${extractedQty} units to ${extractedSku}. Zero manual typing required.`
+      });
+    }
   };
 
   const handleResolveBottleneck = async (stageId) => {
-    const res = await fetch(`${API}/resolve-bottleneck`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ stageId })
+    try {
+      const res = await fetch(`${API}/resolve-bottleneck`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ stageId })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setStatusBanner({ status: "COMMITTED", message: data.message });
+        if (data.state) setErp({ ...erp, ...data.state });
+        loadState();
+        return;
+      }
+    } catch (e) {}
+
+    // Client-side fallback
+    setErp((prev) => {
+      const updatedStages = prev.processMiningStages.map((stage) => {
+        if (stage.id === stageId) {
+          return { ...stage, avgHours: Number((stage.benchmarkHours * 0.75).toFixed(1)), bottleneckScore: 0.55, status: "OPTIMIZED_BY_AI" };
+        }
+        return stage;
+      });
+      const updatedPOs = prev.purchaseOrders.map((po) => ({ ...po, stage: "APPROVED_AUTO_MATCHED", dwellHours: 1, risk: "NORMAL" }));
+      const newAudit = {
+        id: `AUD-${Date.now().toString().slice(-4)}`,
+        timestamp: new Date().toISOString(),
+        actor: "Process Mining Engine",
+        action: "BOTTLENECK_AUTO_REMEDIATED",
+        verdict: "PROCEED",
+        latencyMs: 112,
+        confidence: 0.99,
+        details: "Executed automated 3-way PO/Invoice reconciliation & mobile barcode sync. Dwell time reduced to 4.5h."
+      };
+      return {
+        ...prev,
+        processMiningStages: updatedStages,
+        purchaseOrders: updatedPOs,
+        auditLogs: [newAudit, ...prev.auditLogs],
+        kpis: { ...prev.kpis, bottleneckCount: 0 }
+      };
     });
-    const data = await res.json();
-    setStatusBanner({ status: "COMMITTED", message: data.message });
-    loadState();
+    setStatusBanner({ status: "COMMITTED", message: "AI Process Remediation complete: 3-Way Match & QA Hold bottlenecks cleared." });
   };
 
   const runNlQuery = async (qOverride) => {
-    const q = qOverride ?? nlQuery;
-    setNlQuery(q);
-    const res = await fetch(`${API}/nl-query`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query: q })
-    });
-    const data = await res.json();
-    setNlInsight(data.insight);
+    const q = (qOverride ?? nlQuery).toLowerCase();
+    setNlQuery(qOverride ?? nlQuery);
+
+    try {
+      const res = await fetch(`${API}/nl-query`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query: q })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setNlInsight(data.insight);
+        return;
+      }
+    } catch (e) {}
+
+    // Client-side fallback
+    if (q.includes("bottleneck") || q.includes("delay") || q.includes("slow")) {
+      setNlInsight({
+        title: "Process Mining Dwell-Time Breakdown",
+        summary: "PO Approval & 3-Way Match was averaging 31.5 hours (5.2x over benchmark) due to manual cross-screen PDF checking.",
+        chartData: erp.processMiningStages.map((s) => ({
+          label: s.name.split(".")[1]?.trim() || s.name,
+          name: s.name,
+          stock: Math.round(s.avgHours * 10),
+          reorderPoint: Math.round(s.benchmarkHours * 10),
+          valueUsd: s.activeCount * 1200
+        })),
+        recommendation: "Deploy FlowOps Zero-Entry OCR Intake to cut approval dwell time by 86%."
+      });
+    } else {
+      setNlInsight({
+        title: "Executive Supply Chain & Working Capital Pulse",
+        summary: "2 SKUs are currently below safety reorder points (SKU-1044 & SKU-4090), and $34,850 in Purchase Orders were previously stuck in 3-Way Match & QA holds.",
+        chartData: erp.inventory.map((i) => ({
+          label: i.sku,
+          name: i.name,
+          stock: i.stock,
+          reorderPoint: i.reorderPoint,
+          valueUsd: i.stock * i.unitCost
+        })),
+        recommendation: "Trigger instant reorder for SKU-1044 (Siemens PLC Module) and enable automated 3-Way OCR matching."
+      });
+    }
   };
 
   const startVoiceCapture = () => {
