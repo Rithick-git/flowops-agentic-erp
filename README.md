@@ -1,5 +1,7 @@
 # FlowOps AI: Zero-Friction Agentic ERP Copilot & Role-Adaptive PWA
 
+🌐 **Live Working Demo:** **[https://rithick-git.github.io/flowops-agentic-erp/](https://rithick-git.github.io/flowops-agentic-erp/)**
+
 [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/Rithick-git/flowops-agentic-erp)
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/Rithick-git/flowops-agentic-erp)
 

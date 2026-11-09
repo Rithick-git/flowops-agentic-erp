@@ -1,5 +1,8 @@
 # FlowOps AI: Zero-Friction Agentic ERP Copilot & Role-Adaptive PWA
 
+🌐 **Live Working Demo:** **[https://rithick-git.github.io/flowops-agentic-erp/](https://rithick-git.github.io/flowops-agentic-erp/)**  
+📦 **GitHub Repository:** **[https://github.com/Rithick-git/flowops-agentic-erp](https://github.com/Rithick-git/flowops-agentic-erp)**
+
 ## Tagline
 > **"Eliminating ERP bloat with a role-adaptive Progressive Web App, zero-typing invoice/voice intake, live process-mining bottleneck radar, and sub-115ms deterministic safety guardrails."**
 
